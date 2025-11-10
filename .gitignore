@@ -1,0 +1,4 @@
+plan.txt
+*.docx
+PlanDoc/
+.venv/
