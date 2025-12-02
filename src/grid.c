@@ -1,5 +1,6 @@
 #include "grid.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -51,20 +52,29 @@ bool grid_load_from_file(Grid *grid, const char *path)
         return false;
     }
 
-    // Read cell data
-    for (int y = 0; y < height; ++y)
+    // Read cell data one character at a time, skipping whitespace
+    size_t cell_count = (size_t)width * (size_t)height;
+    size_t cell_index = 0;
+    while (cell_index < cell_count)
     {
-        for (int x = 0; x < width; ++x)
+        int ch = fgetc(fp);
+        if (ch == EOF)
         {
-            int value = 0;
-            if (fscanf(fp, "%d", &value) != 1)
-            {
-                grid_free(grid);
-                fclose(fp);
-                return false;
-            }
-            grid->cells[y * width + x] = (uint8_t)value;
+            grid_free(grid);
+            fclose(fp);
+            return false;
         }
+        if (isspace(ch))
+        {
+            continue;
+        }
+        if (ch != '0' && ch != '1')
+        {
+            grid_free(grid);
+            fclose(fp);
+            return false;
+        }
+        grid->cells[cell_index++] = (uint8_t)(ch - '0');
     }
 
     // Clean up and return

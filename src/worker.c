@@ -4,6 +4,8 @@
 #include "parallel_a_star.h"
 #include "serialization.h"
 
+#include <stdio.h>
+
 static HighLevelNode *clone_parent_node(const HighLevelNode *parent)
 {
     HighLevelNode *clone = cbs_node_create(parent->num_agents);
@@ -86,9 +88,16 @@ static bool process_node(const ProblemInstance *instance,
                          const LowLevelContext *ll_ctx,
                          HighLevelNode *node,
                          int incumbent_cost,
-                         int coordinator_rank)
+                         int coordinator_rank,
+                         int worker_rank)
 {
     node->cost = cbs_compute_soc(node);
+    printf("[Worker %d] Expanding node id=%d depth=%d cost=%.0f\n",
+           worker_rank,
+           node->id,
+           node->depth,
+           node->cost);
+    fflush(stdout);
     Conflict conflict;
     if (!cbs_detect_conflict(node, &conflict))
     {
@@ -96,6 +105,11 @@ static bool process_node(const ProblemInstance *instance,
         serialize_high_level_node(node, &payload);
         send_serialized_node(coordinator_rank, TAG_SOLUTION, &payload);
         free_serialized_node(&payload);
+        printf("[Worker %d] Found valid solution at cost=%.0f (node id=%d)\n",
+               worker_rank,
+               node->cost,
+               node->id);
+        fflush(stdout);
         return true;
     }
 
@@ -132,6 +146,14 @@ static bool process_node(const ProblemInstance *instance,
         children[produced++] = child;
     }
 
+    printf("[Worker %d] Conflict agents=(%d,%d) time=%d -> %d child(ren)\n",
+           worker_rank,
+           conflict.agent_a,
+           conflict.agent_b,
+           conflict.time,
+           produced);
+    fflush(stdout);
+
     MPI_Send(&produced, 1, MPI_INT, coordinator_rank, TAG_CHILDREN, MPI_COMM_WORLD);
 
     for (int i = 0; i < produced; ++i)
@@ -153,6 +175,9 @@ void run_worker(const ProblemInstance *instance,
                 const LowLevelContext *ll_ctx,
                 int coordinator_rank)
 {
+    int world_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
     int active = 1;
     while (active)
     {
@@ -176,7 +201,7 @@ void run_worker(const ProblemInstance *instance,
                 continue;
             }
 
-            process_node(instance, ll_ctx, node, incumbent_cost, coordinator_rank);
+            process_node(instance, ll_ctx, node, incumbent_cost, coordinator_rank, world_rank);
             cbs_node_free(node);
         }
     }

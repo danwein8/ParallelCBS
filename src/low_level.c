@@ -1,5 +1,6 @@
 #include "low_level.h"
 
+#include <stdio.h>
 #include <string.h>
 
 typedef struct
@@ -78,6 +79,9 @@ bool low_level_request_path(const ProblemInstance *instance,
                             const LowLevelContext *ctx,
                             AgentPath *out_path)
 {
+    int world_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
     if (ctx->manager_world_rank < 0)
     {
         return sequential_a_star(&instance->map, constraints, instance->starts[agent_id], instance->goals[agent_id], agent_id, out_path);
@@ -94,6 +98,13 @@ bool low_level_request_path(const ProblemInstance *instance,
         .goal_x = instance->goals[agent_id].x,
         .goal_y = instance->goals[agent_id].y,
         .constraint_count = constraint_count};
+
+    printf("[LL req %d] agent=%d constraints=%d -> manager %d\n",
+           world_rank,
+           agent_id,
+           constraint_count,
+           ctx->manager_world_rank);
+    fflush(stdout);
 
     MPI_Send(&header, sizeof(header) / sizeof(int), MPI_INT, ctx->manager_world_rank, TAG_LL_REQUEST, MPI_COMM_WORLD);
     if (constraint_count > 0)
@@ -113,6 +124,8 @@ bool low_level_request_path(const ProblemInstance *instance,
 
     if (response.status == 0)
     {
+        printf("[LL resp %d] agent=%d status=fail\n", world_rank, agent_id);
+        fflush(stdout);
         return false;
     }
 
@@ -123,6 +136,9 @@ bool low_level_request_path(const ProblemInstance *instance,
         path_buffer = (int *)malloc(sizeof(int) * (size_t)path_ints);
         MPI_Recv(path_buffer, path_ints, MPI_INT, ctx->manager_world_rank, TAG_LL_RESPONSE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
+
+    printf("[LL resp %d] agent=%d status=ok len=%d\n", world_rank, agent_id, response.path_length);
+    fflush(stdout);
 
     path_reserve(out_path, response.path_length);
     out_path->length = response.path_length;
@@ -160,6 +176,8 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
 
     int pool_rank = 0;
     MPI_Comm_rank(ctx->pool_comm, &pool_rank);
+    int world_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
     int running = 1;
     while (running)
@@ -178,6 +196,13 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
                      MPI_COMM_WORLD,
                      &status);
             request_source = status.MPI_SOURCE;
+            printf("[LL mgr world %d pool %d] recv request from %d agent=%d constraints=%d\n",
+                   world_rank,
+                   pool_rank,
+                   request_source,
+                   header.agent_id,
+                   header.constraint_count);
+            fflush(stdout);
         }
 
         MPI_Bcast(&request_source, 1, MPI_INT, 0, ctx->pool_comm);
@@ -245,6 +270,13 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
                 MPI_Send(buffer, ints, MPI_INT, request_source, TAG_LL_RESPONSE, MPI_COMM_WORLD);
                 free(buffer);
             }
+            printf("[LL mgr world %d] send response to %d agent=%d status=%d len=%d\n",
+                   world_rank,
+                   request_source,
+                   header.agent_id,
+                   success ? 1 : 0,
+                   success ? path.length : 0);
+            fflush(stdout);
         }
 
         path_free(&path);

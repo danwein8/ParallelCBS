@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define MAX_AGENTS 16
+#define MAX_AGENTS 32
 #define MAX_PATH_LENGTH 256
 #define MAX_CONSTRAINTS 512
 

@@ -10,8 +10,21 @@ typedef struct
     int count;
 } WorkerSet;
 
+typedef struct
+{
+    long long nodes_expanded;
+    long long nodes_generated;
+    long long conflicts_detected;
+    double best_cost;
+    int solution_found;
+    int timed_out;
+    double runtime_sec;
+} RunStats;
+
 void run_coordinator(const ProblemInstance *instance,
                      const LowLevelContext *ll_ctx,
-                     const WorkerSet *workers);
+                     const WorkerSet *workers,
+                     double timeout_seconds,
+                     RunStats *stats);
 
 #endif /* PARALLEL_CBS_COORDINATOR_H */

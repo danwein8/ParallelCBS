@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static int select_worker(const WorkerSet *workers, int *rr_index)
 {
@@ -49,11 +50,24 @@ static void dispatch_node(const HighLevelNode *node,
 
 void run_coordinator(const ProblemInstance *instance,
                      const LowLevelContext *ll_ctx,
-                     const WorkerSet *workers)
+                     const WorkerSet *workers,
+                     double timeout_seconds,
+                     RunStats *stats)
 {
+    int coord_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &coord_rank);
+
+    double start_time = MPI_Wtime();
+    int timed_out = 0;
+    if (stats)
+    {
+        memset(stats, 0, sizeof(RunStats));
+        stats->best_cost = DBL_MAX;
+    }
+
     if (workers->count == 0)
     {
-        if (MPI_Comm_rank(MPI_COMM_WORLD, &(int){0}) == 0)
+        if (coord_rank == 0)
         {
             fprintf(stderr, "No expansion workers available.\n");
         }
@@ -77,14 +91,31 @@ void run_coordinator(const ProblemInstance *instance,
     }
 
     pq_push(&open, root->cost, root);
+    printf("[Coordinator %d] Root node ready: id=%d cost=%.0f agents=%d\n",
+           coord_rank,
+           root->id,
+           root->cost,
+           instance->num_agents);
+    fflush(stdout);
 
     double incumbent_cost = DBL_MAX;
     HighLevelNode *incumbent_solution = NULL;
     int next_node_id = 1;
     int rr_index = 0;
+    long long nodes_expanded = 0;
+    long long nodes_generated = 0;
+    long long conflicts_detected = 0;
 
     while (open.count > 0)
     {
+        if (timeout_seconds > 0.0 && MPI_Wtime() - start_time > timeout_seconds)
+        {
+            timed_out = 1;
+            printf("[Coordinator %d] Timeout reached (%.2f s). Aborting search.\n", coord_rank, timeout_seconds);
+            fflush(stdout);
+            break;
+        }
+
         double plateau_cost = 0.0;
         double key = 0.0;
         HighLevelNode *front = (HighLevelNode *)pq_pop(&open, &plateau_cost);
@@ -109,10 +140,34 @@ void run_coordinator(const ProblemInstance *instance,
             plateau[plateau_size++] = equal_node;
         }
 
+        nodes_expanded += plateau_size;
+        char incumbent_str[32];
+        if (incumbent_cost < DBL_MAX)
+        {
+            snprintf(incumbent_str, sizeof(incumbent_str), "%.0f", incumbent_cost);
+        }
+        else
+        {
+            strcpy(incumbent_str, "INF");
+        }
+        printf("[Coordinator %d] Dispatching %d node(s) at cost %.0f (incumbent=%s)\n",
+               coord_rank,
+               plateau_size,
+               plateau_cost,
+               incumbent_str);
+        fflush(stdout);
+
         int outstanding = plateau_size;
         for (int i = 0; i < plateau_size; ++i)
         {
             int worker_rank = select_worker(workers, &rr_index);
+            printf("[Coordinator %d] -> Worker %d: node id=%d depth=%d cost=%.0f\n",
+                   coord_rank,
+                   worker_rank,
+                   plateau[i]->id,
+                   plateau[i]->depth,
+                   plateau[i]->cost);
+            fflush(stdout);
             dispatch_node(plateau[i], incumbent_cost, worker_rank);
             cbs_node_free(plateau[i]);
         }
@@ -139,6 +194,12 @@ void run_coordinator(const ProblemInstance *instance,
                     }
                     incumbent_solution = solution_node;
                     incumbent_cost = solution_node->cost;
+                    printf("[Coordinator %d] New incumbent: node id=%d cost=%.0f depth=%d\n",
+                           coord_rank,
+                           solution_node->id,
+                           solution_node->cost,
+                           solution_node->depth);
+                    fflush(stdout);
                 }
                 outstanding--;
             }
@@ -146,10 +207,16 @@ void run_coordinator(const ProblemInstance *instance,
             {
                 int child_count = 0;
                 MPI_Recv(&child_count, 1, MPI_INT, status.MPI_SOURCE, TAG_CHILDREN, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                nodes_generated += child_count;
+                if (child_count > 0)
+                {
+                    conflicts_detected++;
+                }
                 for (int i = 0; i < child_count; ++i)
                 {
                     SerializedNode child_data;
                     receive_serialized_node(status.MPI_SOURCE, TAG_CHILDREN, &child_data, NULL);
+                    int parent_id = child_data.aux_value;
                     HighLevelNode *child = deserialize_high_level_node(&child_data);
                     free_serialized_node(&child_data);
                     if (!child)
@@ -161,6 +228,13 @@ void run_coordinator(const ProblemInstance *instance,
                     if (child->cost < incumbent_cost)
                     {
                         pq_push(&open, child->cost, child);
+                        printf("[Coordinator %d] Received child id=%d (parent=%d) cost=%.0f depth=%d\n",
+                               coord_rank,
+                               child->id,
+                               parent_id,
+                               child->cost,
+                               child->depth);
+                        fflush(stdout);
                     }
                     else
                     {
@@ -190,7 +264,17 @@ void run_coordinator(const ProblemInstance *instance,
     if (incumbent_solution)
     {
         printf("Best solution cost: %.0f\n", incumbent_solution->cost);
+        printf("[Coordinator %d] Solution found with node id=%d depth=%d\n",
+               coord_rank,
+               incumbent_solution->id,
+               incumbent_solution->depth);
+        fflush(stdout);
         cbs_node_free(incumbent_solution);
+    }
+    else
+    {
+        printf("[Coordinator %d] Search finished without finding a solution.\n", coord_rank);
+        fflush(stdout);
     }
 
     while (open.count > 0)
@@ -200,4 +284,15 @@ void run_coordinator(const ProblemInstance *instance,
         cbs_node_free(node);
     }
     pq_free(&open);
+
+    if (stats)
+    {
+        stats->nodes_expanded = nodes_expanded;
+        stats->nodes_generated = nodes_generated;
+        stats->conflicts_detected = conflicts_detected;
+        stats->best_cost = incumbent_cost;
+        stats->solution_found = incumbent_solution != NULL;
+        stats->timed_out = timed_out;
+        stats->runtime_sec = MPI_Wtime() - start_time;
+    }
 }

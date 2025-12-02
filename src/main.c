@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void broadcast_instance(ProblemInstance *instance, int root, MPI_Comm comm)
 {
@@ -103,6 +104,8 @@ int main(int argc, char **argv)
     const char *agents_path = NULL;
     int expanders = -1;
     int low_level_pool = -1;
+    double timeout_seconds = 0.0;
+    const char *csv_path = "results.csv";
 
     // Parse arguments
     for (int i = 1; i < argc; ++i)
@@ -123,6 +126,14 @@ int main(int argc, char **argv)
         {
             low_level_pool = atoi(argv[++i]);
         }
+        else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc)
+        {
+            timeout_seconds = atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc)
+        {
+            csv_path = argv[++i];
+        }
     }
 
     int config_ok = 1;
@@ -131,7 +142,7 @@ int main(int argc, char **argv)
     {
         if (!map_path || !agents_path)
         {
-            fprintf(stderr, "Usage: mpirun -n <procs> parallel_cbs --map map.txt --agents agents.txt [--expanders N] [--ll-pool M]\n");
+            fprintf(stderr, "Usage: mpirun -n <procs> parallel_cbs --map map.txt --agents agents.txt [--expanders N] [--ll-pool M] [--timeout SEC] [--csv path]\n");
             config_ok = 0;
         }
         if (world_size < 2)
@@ -230,10 +241,44 @@ int main(int argc, char **argv)
         }
     }
 
+    RunStats stats;
     if (world_rank == 0)
     {
-        run_coordinator(&instance, &ll_ctx, &workers);
+        run_coordinator(&instance, &ll_ctx, &workers, timeout_seconds, &stats);
         low_level_request_shutdown(&ll_ctx);
+
+        const char *map_name = map_path ? strrchr(map_path, '/') : NULL;
+        map_name = map_name ? map_name + 1 : map_path ? map_path : "unknown";
+        FILE *fp = NULL;
+        int need_header = access(csv_path, F_OK) != 0;
+        fp = fopen(csv_path, "a");
+        if (fp)
+        {
+            if (need_header)
+            {
+                fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,timeout_sec,status\n");
+            }
+            const char *status = stats.solution_found ? "success" : (stats.timed_out ? "timeout" : "failure");
+            double cost_out = stats.solution_found ? stats.best_cost : -1.0;
+            fprintf(fp,
+                    "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.2f,%s\n",
+                    map_name,
+                    instance.num_agents,
+                    instance.map.width,
+                    instance.map.height,
+                    stats.nodes_expanded,
+                    stats.nodes_generated,
+                    stats.conflicts_detected,
+                    cost_out,
+                    stats.runtime_sec,
+                    timeout_seconds,
+                    status);
+            fclose(fp);
+        }
+        else
+        {
+            fprintf(stderr, "Warning: could not open CSV file %s for writing.\n", csv_path);
+        }
     }
     else if (world_rank >= 1 && world_rank < 1 + worker_count)
     {
