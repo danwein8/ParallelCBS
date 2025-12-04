@@ -190,20 +190,19 @@ static bool replan_agent_path(const ProblemInstance *instance,
 //     return true;
 // }
 
-static void push_child(const HighLevelNode *child, int dest_rank)
+static void push_child(const HighLevelNode *child, int dest_rank, PendingSendPool *pool)
 {
     SerializedNode payload;
     serialize_high_level_node(child, &payload);
     
-    // Use MPI_Bsend (buffered send) or accumulate in a buffer
-    // For now, let's just add logging and hope receive_buffered_nodes helps
     printf("[Decentral push] Sending node to rank %d (path_ints=%d, constraint_ints=%d)\n",
            dest_rank, payload.path_int_count, payload.constraint_int_count);
     fflush(stdout);
     
-    send_serialized_node(dest_rank, TAG_DP_NODE, &payload);
+    /* Use async send to avoid blocking */
+    send_serialized_node_async(dest_rank, TAG_DP_NODE, &payload, pool);
     
-    printf("[Decentral push] Send complete to rank %d\n", dest_rank);
+    printf("[Decentral push] Send initiated to rank %d\n", dest_rank);
     fflush(stdout);
     
     free_serialized_node(&payload);
@@ -367,6 +366,10 @@ int main(int argc, char **argv)
     pq_init(&open);
     pq_push(&open, root->cost, root);
 
+    /* Initialize pending send pool for async MPI operations */
+    PendingSendPool send_pool;
+    pending_send_pool_init(&send_pool);
+
     double start_time = MPI_Wtime();
     long long nodes_expanded = 0;
     long long nodes_generated = 0;
@@ -525,12 +528,16 @@ int main(int argc, char **argv)
             {
                 printf("[Decentral %d] About to push_child to rank %d\n", world_rank, dest);
                 fflush(stdout);
-                push_child(child, dest);
+                push_child(child, dest, &send_pool);
                 printf("[Decentral %d] push_child completed to rank %d\n", world_rank, dest);
                 fflush(stdout);
                 cbs_node_free(child);
             }
             nodes_generated++;
+            
+            /* Progress sends and receive any incoming nodes */
+            pending_send_pool_progress(&send_pool);
+            receive_buffered_nodes(&open, world_rank);
         }
         
         printf("[Decentral %d] Finished generating children, freeing parent node\n", world_rank);
@@ -538,6 +545,9 @@ int main(int argc, char **argv)
 
         cbs_node_free(node);
     }
+
+    /* Wait for any pending async sends to complete before cleanup */
+    pending_send_pool_wait_all(&send_pool);
 
     /* Cleanup remaining queued nodes */
     while (open.count > 0)

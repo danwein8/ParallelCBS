@@ -40,12 +40,13 @@ static bool initialize_root(const ProblemInstance *instance,
 
 static void dispatch_node(const HighLevelNode *node,
                           double incumbent_cost,
-                          int worker_rank)
+                          int worker_rank,
+                          PendingSendPool *pool)
 {
     SerializedNode payload;
     serialize_high_level_node(node, &payload);
     payload.aux_value = (int)(incumbent_cost >= (double)INT_MAX ? INT_MAX : (int)ceil(incumbent_cost));
-    send_serialized_node(worker_rank, TAG_TASK, &payload);
+    send_serialized_node_async(worker_rank, TAG_TASK, &payload, pool);
     free_serialized_node(&payload);
 }
 
@@ -99,6 +100,10 @@ void run_coordinator(const ProblemInstance *instance,
            instance->num_agents);
     fflush(stdout);
 
+    /* Initialize pending send pool for async MPI operations */
+    PendingSendPool send_pool;
+    pending_send_pool_init(&send_pool);
+
     double incumbent_cost = DBL_MAX;
     HighLevelNode *incumbent_solution = NULL;
     int next_node_id = 1;
@@ -108,6 +113,7 @@ void run_coordinator(const ProblemInstance *instance,
     long long conflicts_detected = 0;
     long long loop_iterations = 0;
     double last_status_time = start_time;
+    int outstanding = 0;  /* Track outstanding workers at function scope for timeout_exit */
 
     while (open.count > 0)
     {
@@ -181,7 +187,7 @@ void run_coordinator(const ProblemInstance *instance,
                incumbent_str);
         fflush(stdout);
 
-        int outstanding = plateau_size;
+        outstanding = plateau_size;  /* Assign (not declare) to use function-scope variable */
         for (int i = 0; i < plateau_size; ++i)
         {
             int worker_rank = select_worker(workers, &rr_index);
@@ -192,7 +198,7 @@ void run_coordinator(const ProblemInstance *instance,
                    plateau[i]->depth,
                    plateau[i]->cost);
             fflush(stdout);
-            dispatch_node(plateau[i], incumbent_cost, worker_rank);
+            dispatch_node(plateau[i], incumbent_cost, worker_rank, &send_pool);
             cbs_node_free(plateau[i]);
         }
 
@@ -222,6 +228,8 @@ void run_coordinator(const ProblemInstance *instance,
             {
                 // No message available, sleep briefly and check timeout again
                 usleep(1000);  // Sleep 1ms to avoid busy-waiting
+                // Progress any pending async sends
+                pending_send_pool_progress(&send_pool);
                 continue;
             }
             
@@ -320,6 +328,71 @@ void run_coordinator(const ProblemInstance *instance,
     }
 
 timeout_exit:
+    /* Drain any remaining results from outstanding workers before terminating */
+    printf("[Coordinator %d] Draining remaining results from workers (outstanding=%d)...\n", 
+           coord_rank, outstanding);
+    fflush(stdout);
+    
+    /* Keep receiving until we've heard back from all outstanding workers, with a secondary timeout */
+    double drain_start = MPI_Wtime();
+    double drain_timeout = 5.0;  /* Max 5 seconds to drain */
+    
+    while (outstanding > 0)
+    {
+        double drain_elapsed = MPI_Wtime() - drain_start;
+        if (drain_elapsed > drain_timeout)
+        {
+            printf("[Coordinator %d] Drain timeout after %.2fs, %d workers still outstanding\n",
+                   coord_rank, drain_elapsed, outstanding);
+            fflush(stdout);
+            break;
+        }
+        
+        MPI_Status status;
+        int flag = 0;
+        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
+        
+        if (!flag)
+        {
+            usleep(1000);  /* 1ms */
+            pending_send_pool_progress(&send_pool);
+            continue;
+        }
+        
+        if (status.MPI_TAG == TAG_SOLUTION)
+        {
+            SerializedNode solution_data;
+            receive_serialized_node(status.MPI_SOURCE, TAG_SOLUTION, &solution_data, NULL);
+            free_serialized_node(&solution_data);
+            outstanding--;
+            printf("[Coordinator %d] Drained solution from worker %d, outstanding=%d\n",
+                   coord_rank, status.MPI_SOURCE, outstanding);
+            fflush(stdout);
+        }
+        else if (status.MPI_TAG == TAG_CHILDREN)
+        {
+            int source_worker = status.MPI_SOURCE;
+            int child_count = 0;
+            MPI_Recv(&child_count, 1, MPI_INT, source_worker, TAG_CHILDREN, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            for (int i = 0; i < child_count; ++i)
+            {
+                SerializedNode child_data;
+                receive_serialized_node(source_worker, TAG_CHILDREN, &child_data, NULL);
+                free_serialized_node(&child_data);
+            }
+            outstanding--;
+            printf("[Coordinator %d] Drained %d children from worker %d, outstanding=%d\n",
+                   coord_rank, child_count, source_worker, outstanding);
+            fflush(stdout);
+        }
+    }
+    
+    printf("[Coordinator %d] All workers drained, sending termination...\n", coord_rank);
+    fflush(stdout);
+    
+    /* Wait for any pending async sends to complete before terminating workers */
+    pending_send_pool_wait_all(&send_pool);
+
     for (int i = 0; i < workers->count; ++i)
     {
         MPI_Send(NULL, 0, MPI_INT, workers->ranks[i], TAG_TERMINATE, MPI_COMM_WORLD);

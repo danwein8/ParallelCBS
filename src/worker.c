@@ -5,6 +5,7 @@
 #include "serialization.h"
 
 #include <stdio.h>
+#include <unistd.h>
 
 static HighLevelNode *clone_parent_node(const HighLevelNode *parent)
 {
@@ -89,7 +90,8 @@ static bool process_node(const ProblemInstance *instance,
                          HighLevelNode *node,
                          int incumbent_cost,
                          int coordinator_rank,
-                         int worker_rank)
+                         int worker_rank,
+                         PendingSendPool *send_pool)
 {
     node->cost = cbs_compute_soc(node);
     printf("[Worker %d] Expanding node id=%d depth=%d cost=%.0f\n",
@@ -167,7 +169,7 @@ static bool process_node(const ProblemInstance *instance,
         SerializedNode payload;
         serialize_high_level_node(child, &payload);
         payload.aux_value = node->id;
-        send_serialized_node(coordinator_rank, TAG_CHILDREN, &payload);
+        send_serialized_node_async(coordinator_rank, TAG_CHILDREN, &payload, send_pool);
         free_serialized_node(&payload);
         cbs_node_free(child);
     }
@@ -187,11 +189,28 @@ void run_worker(const ProblemInstance *instance,
     int world_rank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
+    /* Initialize pending send pool for async MPI operations */
+    PendingSendPool send_pool;
+    pending_send_pool_init(&send_pool);
+
     int active = 1;
     while (active)
     {
+        /* Progress any pending async sends */
+        pending_send_pool_progress(&send_pool);
+
+        /* Use non-blocking probe to allow checking for termination */
         MPI_Status status;
-        MPI_Probe(coordinator_rank, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+        int flag = 0;
+        MPI_Iprobe(coordinator_rank, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
+        
+        if (!flag)
+        {
+            /* No message available, sleep briefly to avoid busy-waiting */
+            usleep(1000);  /* 1ms */
+            continue;
+        }
+        
         double worker_time = MPI_Wtime();
         printf("[Worker %d] [t=%.1fs] Received message (tag=%d)\n",
                 world_rank, worker_time, status.MPI_TAG);
@@ -214,8 +233,11 @@ void run_worker(const ProblemInstance *instance,
                 continue;
             }
 
-            process_node(instance, ll_ctx, node, incumbent_cost, coordinator_rank, world_rank);
+            process_node(instance, ll_ctx, node, incumbent_cost, coordinator_rank, world_rank, &send_pool);
             cbs_node_free(node);
         }
     }
+
+    /* Wait for any remaining pending sends to complete before exiting */
+    pending_send_pool_wait_all(&send_pool);
 }
