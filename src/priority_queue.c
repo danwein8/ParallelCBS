@@ -27,7 +27,13 @@ void pq_push(PriorityQueue *queue, double key, void *value)
     if (queue->count >= queue->capacity)
     {
         int new_cap = queue->capacity == 0 ? 16 : queue->capacity * 2;
-        queue->items = (PQEntry *)realloc(queue->items, (size_t)new_cap * sizeof(PQEntry));
+        PQEntry *new_items = (PQEntry *)realloc(queue->items, (size_t)new_cap * sizeof(PQEntry));
+        if (!new_items)
+        {
+            fprintf(stderr, "pq_push: failed to allocate memory for PriorityQueue (size=%d)\n", new_cap);
+            exit(EXIT_FAILURE);
+        }
+        queue->items = new_items;
         queue->capacity = new_cap;
     }
     int idx = queue->count++;

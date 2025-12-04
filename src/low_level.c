@@ -99,6 +99,7 @@ bool low_level_request_path(const ProblemInstance *instance,
         .goal_y = instance->goals[agent_id].y,
         .constraint_count = constraint_count};
 
+    double ll_start = MPI_Wtime();
     printf("[LL req %d] agent=%d constraints=%d -> manager %d\n",
            world_rank,
            agent_id,
@@ -121,6 +122,11 @@ bool low_level_request_path(const ProblemInstance *instance,
 
     LLResponseHeader response;
     MPI_Recv(&response, sizeof(response) / sizeof(int), MPI_INT, ctx->manager_world_rank, TAG_LL_RESPONSE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+    double ll_end = MPI_Wtime();
+    printf("[LL req %d] agent=%d: received response in %.3fs\n",
+           world_rank, agent_id, ll_end - ll_start);
+    fflush(stdout);
 
     if (response.status == 0)
     {
@@ -203,6 +209,7 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
                    header.agent_id,
                    header.constraint_count);
             fflush(stdout);
+            double mgr_recv_time = MPI_Wtime();
         }
 
         MPI_Bcast(&request_source, 1, MPI_INT, 0, ctx->pool_comm);
@@ -246,6 +253,10 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
 
         AgentPath path;
         path_init(&path, 0);
+        double path_compute_start = MPI_Wtime();
+        printf("[LL pool %d] Computing path for agent=%d with %d constraints\n",
+               pool_rank, header.agent_id, header.constraint_count);
+        fflush(stdout);
         bool success = parallel_a_star(&instance->map,
                                        &agent_constraints,
                                        (GridCoord){.x = header.start_x, .y = header.start_y},
@@ -254,6 +265,10 @@ void low_level_service_loop(const ProblemInstance *instance, const LowLevelConte
                                        ctx->pool_comm,
                                        &path);
 
+        double path_compute_end = MPI_Wtime();
+        printf("[LL pool %d] Path computation %s for agent=%d in %.3fs\n",
+               pool_rank, success ? "SUCCESS" : "FAILED", header.agent_id, path_compute_end - path_compute_start);
+        fflush(stdout);
         if (pool_rank == 0)
         {
             LLResponseHeader response = {.status = success ? 1 : 0, .path_length = success ? path.length : 0};

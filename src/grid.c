@@ -4,6 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+Initialize Grid of given size
+
+@param grid Pointer to the Grid
+@param width Width of the grid
+@param height Height of the grid
+*/
 void grid_init(Grid *grid, int width, int height)
 {
     grid->width = width;
@@ -16,6 +23,11 @@ void grid_init(Grid *grid, int width, int height)
     }
 }
 
+/*
+Free memory used by Grid
+
+@param grid Pointer to the Grid
+*/
 void grid_free(Grid *grid)
 {
     if (grid->cells != NULL)
@@ -27,6 +39,13 @@ void grid_free(Grid *grid)
     grid->height = 0;
 }
 
+// Load the binary processed map
+/*
+Load the binary processed map file
+
+@param grid Pointer to the Grid
+@param path Pointer to the file path
+*/
 bool grid_load_from_file(Grid *grid, const char *path)
 {
     FILE *fp = fopen(path, "r");

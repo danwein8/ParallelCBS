@@ -5,19 +5,34 @@
 #include "constraints.h"
 #include "grid.h"
 
+/*
+AStarNode represents a node in the A* search algorithm
+*/
 typedef struct
 {
+    /** Position of the node in the grid */
     GridCoord position;
+    /** Cost from start to this node */
     int g_cost;
+    /** Estimated (heuristic) cost from this node to the goal */
     int f_cost;
+    /** Index of the parent node in the buffer */
     int parent_index;
+    /** Time step of the node */
     int time;
 } AStarNode;
 
+/* 
+Buffer for storing AStarNodes dynamically
+stores the paths explored during A* search
+*/
 typedef struct
 {
+    /** Dynamic array of AStarNodes */
     AStarNode *nodes;
+    /** Current number of nodes in the buffer */
     int count;
+    /** Maximum capacity of the buffer */
     int capacity;
 } AStarNodeBuffer;
 

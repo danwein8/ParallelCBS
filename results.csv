@@ -2,3 +2,11 @@ map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_se
 arena_binary.map,10,49,49,3,2,1,236,0.009876,0.00,success
 arena_binary.map,15,49,49,3,4,2,388,0.012709,0.00,success
 arena_binary.map,18,49,49,3,4,2,577,0.017731,0.00,success
+arena_binary.map,18,49,49,3,4,2,577,0.011577,0.00,success
+brc100d_binary.map,20,492,512,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure
+den203d_binary.map,5,77,93,0,0,0,-1,0.000000,0.00,failure

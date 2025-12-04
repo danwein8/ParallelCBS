@@ -98,6 +98,10 @@ static bool process_node(const ProblemInstance *instance,
            node->depth,
            node->cost);
     fflush(stdout);
+    double process_start = MPI_Wtime();
+    printf("[Worker %d] [START] Processing node id=%d depth=%d cost=%.0f\n",
+           worker_rank, node->id, node->depth, node->cost);
+    fflush(stdout);
     Conflict conflict;
     if (!cbs_detect_conflict(node, &conflict))
     {
@@ -168,6 +172,11 @@ static bool process_node(const ProblemInstance *instance,
         cbs_node_free(child);
     }
 
+    double process_end = MPI_Wtime();
+    printf("[Worker %d] [END] Processed node id=%d in %.3fs, produced %d children\n",
+           worker_rank, node->id, process_end - process_start, produced);
+    fflush(stdout);
+    
     return false;
 }
 
@@ -183,6 +192,10 @@ void run_worker(const ProblemInstance *instance,
     {
         MPI_Status status;
         MPI_Probe(coordinator_rank, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+        double worker_time = MPI_Wtime();
+        printf("[Worker %d] [t=%.1fs] Received message (tag=%d)\n",
+                world_rank, worker_time, status.MPI_TAG);
+        fflush(stdout);
         if (status.MPI_TAG == TAG_TERMINATE)
         {
             MPI_Recv(NULL, 0, MPI_INT, coordinator_rank, TAG_TERMINATE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);

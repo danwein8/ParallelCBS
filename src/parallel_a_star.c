@@ -6,28 +6,50 @@
 #include <limits.h>
 #include <math.h>
 #include <memory.h>
+#include <stdio.h>
 
+// Define maximum number of neighbors (4 directions + wait)
 #define MAX_NEIGHBORS 5
 
+/* 
+Message structure for low-level A* task 
+This is all the information sent from the low level coordinator to the low
+level workers, they use this to expand A* nodes
+*/
 typedef struct
 {
+    /* Index of the node in the buffer */
     int node_index;
+    /* X coordinate */
     int x;
+    /* Y coordinate */
     int y;
+    /* Cost from start to this node */
     int g;
+    /* Time step */
     int time;
 } LLTaskMessage;
 
+/* Message structure for low-level A* result */
 typedef struct
 {
+    /* Index of the originating node in the A* buffer (parent node) */
     int from_node_index;
+    /* Number of neighbors */
     int neighbor_count;
-    int data[MAX_NEIGHBORS][4]; /* x, y, g, time */
+    /* Neighbor data: for each neighbor, store x, y, g, time, used to add child nodes to the buffer */
+    int data[MAX_NEIGHBORS][4];
 } LLResultMessage;
 
+// Ensure no padding in message structs
 _Static_assert(sizeof(LLTaskMessage) == sizeof(int) * 5, "LLTaskMessage padding mismatch");
 _Static_assert(sizeof(LLResultMessage) == sizeof(int) * (2 + MAX_NEIGHBORS * 4), "LLResultMessage padding mismatch");
 
+/*
+Initialize AStarNodeBuffer
+
+@param buffer Pointer to the AStarNodeBuffer to initialize
+*/
 void a_star_buffer_init(AStarNodeBuffer *buffer)
 {
     buffer->nodes = NULL;
@@ -35,6 +57,11 @@ void a_star_buffer_init(AStarNodeBuffer *buffer)
     buffer->capacity = 0;
 }
 
+/*
+Free memory used by AStarNodeBuffer
+
+@param buffer Pointer to the AStarNodeBuffer to free
+*/
 void a_star_buffer_free(AStarNodeBuffer *buffer)
 {
     free(buffer->nodes);
@@ -43,29 +70,71 @@ void a_star_buffer_free(AStarNodeBuffer *buffer)
     buffer->capacity = 0;
 }
 
+/*
+Add AStarNode to AStarNodeBuffer
+
+@param buffer Pointer to the AStarNodeBuffer
+@param node AStarNode to add
+@return Index of the added node
+*/
 int a_star_buffer_add(AStarNodeBuffer *buffer, AStarNode node)
 {
+    // expand buffer if needed
     if (buffer->count >= buffer->capacity)
     {
         int new_cap = buffer->capacity == 0 ? 256 : buffer->capacity * 2;
-        buffer->nodes = (AStarNode *)realloc(buffer->nodes, sizeof(AStarNode) * (size_t)new_cap);
+        AStarNode *new_nodes = (AStarNode *)realloc(buffer->nodes, sizeof(AStarNode) * (size_t)new_cap);
+        // check allocation
+        if (!new_nodes)
+        {
+            fprintf(stderr, "a_star_buffer_add: failed to allocate memory for AStarNodeBuffer (size=%d)\n", new_cap);
+            exit(EXIT_FAILURE);
+        }
+        buffer->nodes = new_nodes;
         buffer->capacity = new_cap;
     }
     buffer->nodes[buffer->count] = node;
     return buffer->count++;
 }
 
+/*
+Heuristic function: Manhattan distance
+
+@param a First GridCoord
+@param b Second GridCoord
+@return Heuristic cost between a and b
+*/
 static inline double heuristic(GridCoord a, GridCoord b)
 {
     return fabs((double)a.x - (double)b.x) + fabs((double)a.y - (double)b.y);
 }
 
-static inline int state_index(const Grid *grid, int time, int x, int y)
+/*
+Calculate a unique state index based on grid dimensions, time, and coordinates
+
+@param grid Pointer to the Grid
+@param time Time step
+@param x X coordinate
+@param y Y coordinate
+@return Unique state index
+*/
+static inline size_t state_index(const Grid *grid, int time, int x, int y)
 {
-    int plane = grid->width * grid->height;
-    return time * plane + y * grid->width + x;
+    size_t plane = (size_t)grid->width * (size_t)grid->height;
+    return (size_t)time * plane + (size_t)y * (size_t)grid->width + (size_t)x;
 }
 
+/*
+Check if agent_id moving from 'from' to 'to' at given times violates any constraints
+
+@param set Pointer to the ConstraintSet
+@param agent_id ID of the agent
+@param time_from Time step of the starting position
+@param time_to Time step of the ending position
+@param from Starting GridCoord
+@param to Ending GridCoord
+@return true if the move violates a constraint, false otherwise
+*/
 static bool violates_constraint(const ConstraintSet *set,
                                 int agent_id,
                                 int time_from,
@@ -73,18 +142,23 @@ static bool violates_constraint(const ConstraintSet *set,
                                 GridCoord from,
                                 GridCoord to)
 {
+    // check all constraints in the set
     for (int i = 0; i < set->count; ++i)
     {
+        // create pointer to current constraint
         const Constraint *c = &set->items[i];
+        // skip constraints not relevant to this agent
         if (c->agent_id >= 0 && c->agent_id != agent_id)
         {
             continue;
         }
+        // check vertex constraint
         if (c->type == CONSTRAINT_VERTEX && c->time == time_to &&
             c->vertex.x == to.x && c->vertex.y == to.y)
         {
             return true;
         }
+        // check edge constraint
         if (c->type == CONSTRAINT_EDGE && c->time == time_from &&
             c->vertex.x == from.x && c->vertex.y == from.y &&
             c->edge_to.x == to.x && c->edge_to.y == to.y)
@@ -95,6 +169,18 @@ static bool violates_constraint(const ConstraintSet *set,
     return false;
 }
 
+/*
+Generate valid neighboring nodes for the given AStarNode
+
+@param grid Pointer to the Grid
+@param constraints Pointer to the ConstraintSet
+@param agent_id ID of the agent
+@param node Pointer to the current AStarNode
+@param neighbors Output array of neighboring GridCoords
+@param g_costs Output array of g_costs for neighbors
+@param times Output array of time steps for neighbors
+@return Number of valid neighbors generated
+*/
 static int generate_neighbors(const Grid *grid,
                               const ConstraintSet *constraints,
                               int agent_id,
@@ -103,6 +189,7 @@ static int generate_neighbors(const Grid *grid,
                               int g_costs[MAX_NEIGHBORS],
                               int times[MAX_NEIGHBORS])
 {
+    // all possible moves: wait, up, down, left, right
     static const GridCoord moves[MAX_NEIGHBORS] = {
         {0, 0},  /* wait */
         {1, 0},
@@ -110,16 +197,20 @@ static int generate_neighbors(const Grid *grid,
         {0, 1},
         {0, -1}};
 
+    // generate neighbors by applying all possible moves
     int produced = 0;
     for (int i = 0; i < MAX_NEIGHBORS; ++i)
     {
+        // calculate next position and time
         GridCoord next = {node->position.x + moves[i].x, node->position.y + moves[i].y};
         int next_time = node->time + 1;
 
+        // check if next position is within grid bounds
         if (!grid_in_bounds(grid, next.x, next.y))
         {
             continue;
         }
+        // check if next position is an obstacle (if not waiting)
         if (moves[i].x != 0 || moves[i].y != 0)
         {
             if (grid_is_obstacle(grid, next.x, next.y))
@@ -127,7 +218,7 @@ static int generate_neighbors(const Grid *grid,
                 continue;
             }
         }
-
+        // check if move violates any constraints
         if (violates_constraint(constraints,
                                 agent_id,
                                 node->time,
@@ -137,7 +228,7 @@ static int generate_neighbors(const Grid *grid,
         {
             continue;
         }
-
+        // add valid neighbor to the list
         neighbors[produced] = next;
         g_costs[produced] = node->g_cost + 1;
         times[produced] = next_time;
@@ -147,13 +238,24 @@ static int generate_neighbors(const Grid *grid,
     return produced;
 }
 
+/*
+Reconstruct path from A* search by following parent indices
+
+@param buffer Pointer to the AStarNodeBuffer
+@param goal_index Index of the goal node in the buffer
+@param path Pointer to the AgentPath to store the reconstructed path
+*/
 static void reconstruct_path(const AStarNodeBuffer *buffer, int goal_index, AgentPath *path)
 {
+    // allocate path memory
     const AStarNode *node = &buffer->nodes[goal_index];
     int length = node->time + 1;
     path_reserve(path, length);
 
+    // reconstruct path by following parent indices
+    // track node index
     int idx = goal_index;
+    // track write position in path (path length - 1 to 0)
     int write_pos = length - 1;
     while (idx >= 0 && write_pos >= 0)
     {
@@ -165,6 +267,17 @@ static void reconstruct_path(const AStarNodeBuffer *buffer, int goal_index, Agen
     path->length = length;
 }
 
+/*
+Sequential A* search algorithm
+
+@param grid Pointer to the Grid
+@param constraints Pointer to the ConstraintSet
+@param start Starting GridCoord
+@param goal Goal GridCoord
+@param agent_id ID of the agent
+@param out_path Pointer to the AgentPath to store the found path
+@return true if a path is found, false otherwise
+*/
 bool sequential_a_star(const Grid *grid,
                        const ConstraintSet *constraints,
                        GridCoord start,
@@ -172,16 +285,32 @@ bool sequential_a_star(const Grid *grid,
                        int agent_id,
                        AgentPath *out_path)
 {
+    double astar_start = MPI_Wtime();
+    printf("[A*] Starting sequential A* for agent %d (start=%d,%d goal=%d,%d)\n",
+           agent_id, start.x, start.y, goal.x, goal.y);
+    fflush(stdout);
+
+    // initialize A* buffer and priority queue
     AStarNodeBuffer buffer;
     a_star_buffer_init(&buffer);
 
     PriorityQueue open;
     pq_init(&open);
 
-    int max_time = MAX_PATH_LENGTH;
+    /* Cap horizon to a reasonable bound: 4 times the number of grid cells */
+    int max_time = grid->width * grid->height * 4;
+    if (max_time < 0 || max_time < MAX_PATH_LENGTH)
+    {
+        max_time = MAX_PATH_LENGTH;
+    }
     int plane = grid->width * grid->height;
     int total = max_time * plane;
     int *best_cost = (int *)malloc(sizeof(int) * (size_t)total);
+    if (!best_cost)
+    {
+        fprintf(stderr, "sequential_a_star: failed to allocate best_cost (size=%d)\n", total);
+        return false;
+    }
     for (int i = 0; i < total; ++i)
     {
         best_cost[i] = INT_MAX;
@@ -194,9 +323,31 @@ bool sequential_a_star(const Grid *grid,
 
     bool found = false;
     int goal_index = -1;
+    long long iterations = 0;
+    double last_progress_time = astar_start;
 
     while (open.count > 0)
     {
+        iterations++;
+
+        // Progress indicatior every 10000 iterations or 5 seconds
+        double now = MPI_Wtime();
+        if (iterations % 10000 == 0 || (now - last_progress_time) >= 5.0)
+        {
+            printf("[A*] agent=%d: iter=%lld open=%d buffer=%d elapsed=%.1fs\n",
+                   agent_id, iterations, open.count, buffer.count, now - astar_start);
+            fflush(stdout);
+            last_progress_time = now;
+        }
+
+        if (open.count > plane * max_time)
+        {
+            /* Defensive: bail if queue explodes beyond expected horizon */
+            printf("[A*] agent=%d: Queue explosion detected (open=%d > %d), aborting\n",
+                   agent_id, open.count, plane * max_time);
+            fflush(stdout);
+            break;
+        }
         double key = 0.0;
         int node_index = (int)(intptr_t)pq_pop(&open, &key);
         AStarNode *node = &buffer.nodes[node_index];
@@ -215,9 +366,15 @@ bool sequential_a_star(const Grid *grid,
         {
             if (times[i] >= max_time)
             {
+                fprintf(stderr, "EXCEEDED MAX TIME\n");
                 continue;
             }
-            int idx = state_index(grid, times[i], neighbors[i].x, neighbors[i].y);
+            size_t idx = state_index(grid, times[i], neighbors[i].x, neighbors[i].y);
+            if (idx >= (size_t)total) 
+            {
+                fprintf(stderr, "state_index out of bounds: %zu (total=%zu)\n", idx, (size_t)total);
+                continue;
+            }
             if (best_cost[idx] <= g_costs[i])
             {
                 continue;
@@ -239,6 +396,10 @@ bool sequential_a_star(const Grid *grid,
         reconstruct_path(&buffer, goal_index, out_path);
     }
 
+    double astar_end = MPI_Wtime();
+    printf("[A*] agent=%d: %s in %.3fs (%lld iterations, %d nodes)\n",
+           agent_id, found ? "SUCCESS" : "FAILED", astar_end - astar_start, iterations, buffer.count);
+    fflush(stdout);
     free(best_cost);
     pq_free(&open);
     a_star_buffer_free(&buffer);
@@ -290,7 +451,12 @@ bool parallel_a_star(const Grid *grid,
         PriorityQueue open;
         pq_init(&open);
 
-        int max_time = MAX_PATH_LENGTH;
+        /* Cap horizon to a reasonable bound: 4 times the number of grid cells */
+        int max_time = grid->width * grid->height * 4;
+        if (max_time < 0 || max_time < MAX_PATH_LENGTH)
+        {
+            max_time = MAX_PATH_LENGTH;
+        }
         int plane = local_grid.width * local_grid.height;
         int total = max_time * plane;
         int *best_cost = (int *)malloc(sizeof(int) * (size_t)total);
@@ -335,6 +501,8 @@ bool parallel_a_star(const Grid *grid,
                 break;
             }
 
+            int num_workers_used = task_count;
+
             for (int i = 0; i < task_count; ++i)
             {
                 int worker_rank = next_worker;
@@ -353,7 +521,7 @@ bool parallel_a_star(const Grid *grid,
                 MPI_Send(&msg, sizeof(LLTaskMessage) / sizeof(int), MPI_INT, worker_rank, TAG_LL_TASK, comm);
             }
 
-            for (int i = 0; i < task_count; ++i)
+            for (int i = 0; i < num_workers_used; ++i)
             {
                 LLResultMessage result;
                 MPI_Status status;
@@ -417,6 +585,8 @@ bool parallel_a_star(const Grid *grid,
             MPI_Send(NULL, 0, MPI_INT, worker_rank, TAG_LL_TERMINATE, comm);
         }
 
+        MPI_Barrier(comm); // ensure all workers have terminated
+        MPI_Bcast(&success_flag, 1, MPI_INT, 0, comm);
         free(best_cost);
         pq_free(&open);
         a_star_buffer_free(&buffer);
@@ -465,7 +635,7 @@ bool parallel_a_star(const Grid *grid,
             }
         }
     }
-
+    MPI_Barrier(comm); // ensure all ranks reach this point
     MPI_Bcast(&success_flag, 1, MPI_INT, 0, comm);
     if (rank != 0)
     {
