@@ -382,11 +382,16 @@ int main(int argc, char **argv)
     int active = 1;
     while (active)
     {
+        /* Check local timeout and broadcast to all processes so they exit together */
         double elapsed = MPI_Wtime() - start_time;
-        if (timeout_seconds > 0.0 && elapsed > timeout_seconds)
+        int local_timeout = (timeout_seconds > 0.0 && elapsed > timeout_seconds) ? 1 : 0;
+        int any_timeout = 0;
+        MPI_Allreduce(&local_timeout, &any_timeout, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        
+        if (any_timeout)
         {
             timed_out = 1;
-            printf("[Decentral %d] TIMEOUT at %.2fs\n", world_rank, elapsed);
+            printf("[Decentral %d] TIMEOUT at %.2fs (coordinated exit)\n", world_rank, elapsed);
             fflush(stdout);
             break;
         }
@@ -403,16 +408,6 @@ int main(int argc, char **argv)
 
         double global_lb = DBL_MAX;
         MPI_Allreduce(&local_lb, &global_lb, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-
-        // Check timeout again after Allreduce
-        elapsed = MPI_Wtime() - start_time;
-        if (timeout_seconds > 0.0 && elapsed > timeout_seconds)
-        {
-            timed_out = 1;
-            printf("[Decentral %d] TIMEOUT at %.2fs (after Allreduce)\n", world_rank, elapsed);
-            fflush(stdout);
-            break;
-        }
 
         double global_sol = DBL_MAX;
         MPI_Allreduce(&local_solution_cost, &global_sol, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);

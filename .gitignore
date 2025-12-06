@@ -2,3 +2,15 @@ plan.txt
 *.docx
 PlanDoc/
 .venv/
+parallel_cbs
+probe
+*.o
+Random_agent_scenarios/
+*.txt
+*.map
+*.csv
+.vscode/
+central_cbs
+serial_cbs
+decentralized_cbs
+*.log
