@@ -89,18 +89,18 @@ def pick_random_start_goal(map_file, num_agents, outfile):
             out.write(f"{start[0]} {start[1]} {goal[0]} {goal[1]}\n")
             
 if __name__ == "__main__":
-    benchmark_dir = r"MAPF_benchmark_maps"
-    for file in os.listdir(benchmark_dir):
-        if file.endswith(".map"):
-            inpath = os.path.join(benchmark_dir, file)
-            outpath = os.path.join(r"Processed_MAPF_maps", file[:-4] + "_binary.map")
-            process_map_to_binary(inpath, outpath)
+    # benchmark_dir = r"MAPF_benchmark_maps"
+    # for file in os.listdir(benchmark_dir):
+    #     if file.endswith(".map"):
+    #         inpath = os.path.join(benchmark_dir, file)
+    #         outpath = os.path.join(r"Processed_MAPF_maps", file[:-4] + "_binary.map")
+    #         process_map_to_binary(inpath, outpath)
     
     processed_dir = r"Processed_MAPF_maps"
     out_dir = r"Random_agent_scenarios"
     for file in os.listdir(processed_dir):
         if file.endswith("_binary.map"):
             map_path = os.path.join(processed_dir, file)
-            for num_agents in [5, 10, 15, 20, 25, 30, 35, 40]:
+            for num_agents in [10, 20, 30]:
                 out_path = os.path.join(out_dir, str(num_agents) + "_" + file[:-11] + "_scenario.txt")
                 pick_random_start_goal(map_path, num_agents, out_path)

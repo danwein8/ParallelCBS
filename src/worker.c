@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE  /* For usleep() on Linux */
 #include "worker.h"
 
 #include "messages.h"

@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE  /* For usleep() on Linux */
 #include "coordinator.h"
 
 #include "messages.h"
@@ -61,6 +62,7 @@ void run_coordinator(const ProblemInstance *instance,
 
     double start_time = MPI_Wtime();
     int timed_out = 0;
+    double total_comm_time = 0.0;  /* Accumulated MPI communication time */
     if (stats)
     {
         memset(stats, 0, sizeof(RunStats));
@@ -240,7 +242,9 @@ void run_coordinator(const ProblemInstance *instance,
             if (status.MPI_TAG == TAG_SOLUTION)
             {
                 SerializedNode solution_data;
+                double comm_start = MPI_Wtime();
                 receive_serialized_node(status.MPI_SOURCE, TAG_SOLUTION, &solution_data, NULL);
+                total_comm_time += MPI_Wtime() - comm_start;
                 HighLevelNode *solution_node = deserialize_high_level_node(&solution_data);
                 free_serialized_node(&solution_data);
                 if (solution_node)
@@ -268,7 +272,9 @@ void run_coordinator(const ProblemInstance *instance,
             {
                 int source_worker = status.MPI_SOURCE;
                 int child_count = 0;
+                double comm_start = MPI_Wtime();
                 MPI_Recv(&child_count, 1, MPI_INT, source_worker, TAG_CHILDREN, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                total_comm_time += MPI_Wtime() - comm_start;
                 nodes_generated += child_count;
                 if (child_count > 0)
                 {
@@ -281,7 +287,9 @@ void run_coordinator(const ProblemInstance *instance,
                 for (int i = 0; i < child_count; ++i)
                 {
                     SerializedNode child_data;
+                    double comm_start = MPI_Wtime();
                     receive_serialized_node(source_worker, TAG_CHILDREN, &child_data, NULL);
+                    total_comm_time += MPI_Wtime() - comm_start;
                     int parent_id = child_data.aux_value;
                     HighLevelNode *child = deserialize_high_level_node(&child_data);
                     free_serialized_node(&child_data);
@@ -431,6 +439,8 @@ timeout_exit:
         stats->solution_found = incumbent_solution != NULL;
         stats->timed_out = timed_out;
         stats->runtime_sec = MPI_Wtime() - start_time;
+        stats->comm_time_sec = total_comm_time;
+        stats->compute_time_sec = stats->runtime_sec - total_comm_time;
     }
 }
 

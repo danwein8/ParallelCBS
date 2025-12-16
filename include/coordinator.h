@@ -19,6 +19,8 @@ typedef struct
     int solution_found;
     int timed_out;
     double runtime_sec;
+    double comm_time_sec;    /* Time spent in MPI communication */
+    double compute_time_sec; /* Time spent in CBS computation */
 } RunStats;
 
 void run_coordinator(const ProblemInstance *instance,

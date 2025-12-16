@@ -216,7 +216,7 @@ static void push_child(const HighLevelNode *child, int dest_rank, PendingSendPoo
 //     free_serialized_node(&payload);
 // }
 
-static void receive_buffered_nodes(PriorityQueue *open, int self_rank)
+static void receive_buffered_nodes(PriorityQueue *open, int self_rank, double *comm_time_acc)
 {
     int flag = 0;
     MPI_Status status;
@@ -228,7 +228,9 @@ static void receive_buffered_nodes(PriorityQueue *open, int self_rank)
             break;
         }
         SerializedNode payload;
+        double recv_start = MPI_Wtime();
         receive_serialized_node(status.MPI_SOURCE, TAG_DP_NODE, &payload, NULL);
+        if (comm_time_acc) *comm_time_acc += MPI_Wtime() - recv_start;
         HighLevelNode *node = deserialize_high_level_node(&payload);
         free_serialized_node(&payload);
         if (node)
@@ -373,9 +375,11 @@ int main(int argc, char **argv)
     double start_time = MPI_Wtime();
     long long nodes_expanded = 0;
     long long nodes_generated = 0;
+    // long long max_nodes_expanded = 20000;
     long long conflicts_detected = 0;
     int timed_out = 0;
     double local_solution_cost = DBL_MAX;
+    double local_comm_time = 0.0;  /* Track MPI communication time */
 
     int rr_dest = (world_rank + 1) % world_size;
 
@@ -386,7 +390,9 @@ int main(int argc, char **argv)
         double elapsed = MPI_Wtime() - start_time;
         int local_timeout = (timeout_seconds > 0.0 && elapsed > timeout_seconds) ? 1 : 0;
         int any_timeout = 0;
+        double comm_start = MPI_Wtime();
         MPI_Allreduce(&local_timeout, &any_timeout, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        local_comm_time += MPI_Wtime() - comm_start;
         
         if (any_timeout)
         {
@@ -396,7 +402,7 @@ int main(int argc, char **argv)
             break;
         }
         
-        receive_buffered_nodes(&open, world_rank);
+        receive_buffered_nodes(&open, world_rank, &local_comm_time);
 
         double local_lb = DBL_MAX;
         if (open.count > 0)
@@ -407,10 +413,14 @@ int main(int argc, char **argv)
         }
 
         double global_lb = DBL_MAX;
+        comm_start = MPI_Wtime();
         MPI_Allreduce(&local_lb, &global_lb, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        local_comm_time += MPI_Wtime() - comm_start;
 
         double global_sol = DBL_MAX;
+        comm_start = MPI_Wtime();
         MPI_Allreduce(&local_solution_cost, &global_sol, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        local_comm_time += MPI_Wtime() - comm_start;
         if (global_sol < DBL_MAX / 2.0)
         {
             printf("[Decentral %d] Global solution found: %.0f\n", world_rank, global_sol);
@@ -480,7 +490,7 @@ int main(int argc, char **argv)
             fflush(stdout);
             
             // CRITICAL: Drain incoming messages to prevent send deadlock
-            receive_buffered_nodes(&open, world_rank);
+            receive_buffered_nodes(&open, world_rank, &local_comm_time);
             
             HighLevelNode *child = clone_parent_node(node);
             if (!child)
@@ -532,7 +542,7 @@ int main(int argc, char **argv)
             
             /* Progress sends and receive any incoming nodes */
             pending_send_pool_progress(&send_pool);
-            receive_buffered_nodes(&open, world_rank);
+            receive_buffered_nodes(&open, world_rank, &local_comm_time);
         }
         
         printf("[Decentral %d] Finished generating children, freeing parent node\n", world_rank);
@@ -558,10 +568,12 @@ int main(int argc, char **argv)
     long long total_expanded = 0;
     long long total_generated = 0;
     long long total_conflicts = 0;
+    double total_comm_time = 0.0;
     int any_timeout = 0;
     MPI_Reduce(&nodes_expanded, &total_expanded, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&nodes_generated, &total_generated, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&conflicts_detected, &total_conflicts, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_comm_time, &total_comm_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Allreduce(&timed_out, &any_timeout, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
     double global_solution = DBL_MAX;
@@ -573,16 +585,19 @@ int main(int argc, char **argv)
         map_name = map_name ? map_name + 1 : map_path ? map_path : "unknown";
         int need_header = access(csv_path, F_OK) != 0;
         FILE *fp = fopen(csv_path, "a");
+        /* For decentralized: avg comm time per process, compute time = runtime - avg_comm */
+        double avg_comm_time = total_comm_time / world_size;
+        double compute_time = runtime - avg_comm_time;
         if (fp)
         {
             if (need_header)
             {
-                fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,timeout_sec,status\n");
+                fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,comm_time_sec,compute_time_sec,timeout_sec,status\n");
             }
             const char *status = (global_solution < DBL_MAX / 2.0) ? "success" : (any_timeout ? "timeout" : "failure");
             double cost_out = (global_solution < DBL_MAX / 2.0) ? global_solution : -1.0;
             fprintf(fp,
-                    "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.2f,%s\n",
+                    "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.6f,%.6f,%.2f,%s\n",
                     map_name,
                     instance.num_agents,
                     instance.map.width,
@@ -592,6 +607,8 @@ int main(int argc, char **argv)
                     total_conflicts,
                     cost_out,
                     runtime,
+                    avg_comm_time,
+                    compute_time,
                     timeout_seconds,
                     status);
             fclose(fp);
@@ -603,7 +620,8 @@ int main(int argc, char **argv)
 
         if (global_solution < DBL_MAX / 2.0)
         {
-            printf("[Decentral] Found solution cost=%.0f (expanded=%lld)\n", global_solution, total_expanded);
+            printf("[Decentral] Found solution cost=%.0f (expanded=%lld, comm=%.3fs, compute=%.3fs)\n", 
+                   global_solution, total_expanded, avg_comm_time, compute_time);
         }
         else
         {

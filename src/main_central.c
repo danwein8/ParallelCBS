@@ -233,12 +233,12 @@ int main(int argc, char **argv)
         {
             if (need_header)
             {
-                fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,timeout_sec,status\n");
+                fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,comm_time_sec,compute_time_sec,timeout_sec,status\n");
             }
             const char *status = stats.solution_found ? "success" : (stats.timed_out ? "timeout" : "failure");
             double cost_out = stats.solution_found ? stats.best_cost : -1.0;
             fprintf(fp,
-                    "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.2f,%s\n",
+                    "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.6f,%.6f,%.2f,%s\n",
                     map_name,
                     instance.num_agents,
                     instance.map.width,
@@ -248,6 +248,8 @@ int main(int argc, char **argv)
                     stats.conflicts_detected,
                     cost_out,
                     stats.runtime_sec,
+                    stats.comm_time_sec,
+                    stats.compute_time_sec,
                     timeout_seconds,
                     status);
             fclose(fp);

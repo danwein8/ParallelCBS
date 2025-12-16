@@ -126,11 +126,17 @@ static void run_serial_cbs(const ProblemInstance *instance,
     long long nodes_expanded = 0;
     long long nodes_generated = 0;
     long long conflicts_detected = 0;
+    long long max_nodes_expanded = 20000;
     HighLevelNode *incumbent = NULL;
     int timed_out = 0;
 
     while (open.count > 0)
     {
+        if (nodes_expanded >= max_nodes_expanded)
+        {
+            timed_out = 1;
+            break;
+        }
         if (timeout_seconds > 0.0 && wall_time_seconds() - start > timeout_seconds)
         {
             timed_out = 1;
