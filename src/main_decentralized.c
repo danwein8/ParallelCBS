@@ -260,7 +260,7 @@ int main(int argc, char **argv)
     const char *agents_path = NULL;
     double timeout_seconds = 0.0;
     const char *csv_path = "results_decentral.csv";
-    double suboptimality = 1.0;
+    double suboptimality = 1.5;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -417,17 +417,6 @@ int main(int argc, char **argv)
         MPI_Allreduce(&local_lb, &global_lb, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
         local_comm_time += MPI_Wtime() - comm_start;
 
-        double global_sol = DBL_MAX;
-        comm_start = MPI_Wtime();
-        MPI_Allreduce(&local_solution_cost, &global_sol, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-        local_comm_time += MPI_Wtime() - comm_start;
-        if (global_sol < DBL_MAX / 2.0)
-        {
-            printf("[Decentral %d] Global solution found: %.0f\n", world_rank, global_sol);
-            fflush(stdout);
-            break;
-        }
-
         if (global_lb >= DBL_MAX / 2.0)
         {
             /* All queues empty and no solution */
@@ -437,6 +426,28 @@ int main(int argc, char **argv)
         }
 
         double bound = suboptimality * global_lb;
+
+        double global_sol = DBL_MAX;
+        comm_start = MPI_Wtime();
+        MPI_Allreduce(&local_solution_cost, &global_sol, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        local_comm_time += MPI_Wtime() - comm_start;
+        if (global_sol < DBL_MAX / 2.0)
+        {
+            /* Only stop when solution respects the current bound (w=1 => optimal) */
+            if (global_sol <= bound + 1e-6)
+            {
+                printf("[Decentral %d] Global solution within bound: %.0f (bound=%.0f)\n",
+                       world_rank, global_sol, bound);
+                fflush(stdout);
+                break;
+            }
+            else
+            {
+                printf("[Decentral %d] Solution %.0f found but above bound %.0f, continue search\n",
+                       world_rank, global_sol, bound);
+                fflush(stdout);
+            }
+        }
 
         if (open.count == 0)
         {
@@ -551,6 +562,33 @@ int main(int argc, char **argv)
         cbs_node_free(node);
     }
 
+    /* Drain any in-flight node transfers and allow async sends to progress before shutdown */
+    double drain_start = MPI_Wtime();
+    while (1)
+    {
+        receive_buffered_nodes(&open, world_rank, &local_comm_time);
+        pending_send_pool_progress(&send_pool);
+
+        MPI_Status probe_status;
+        int has_pending = 0;
+        MPI_Iprobe(MPI_ANY_SOURCE, TAG_DP_NODE, MPI_COMM_WORLD, &has_pending, &probe_status);
+        int outstanding_sends = send_pool.count;
+        double drain_elapsed = MPI_Wtime() - drain_start;
+
+        if (!has_pending && outstanding_sends == 0)
+        {
+            break;
+        }
+        if (drain_elapsed > 2.0)
+        {
+            printf("[Decentral %d] Drain timeout after %.2fs (pending_recv=%d pending_send=%d)\n",
+                   world_rank, drain_elapsed, has_pending, outstanding_sends);
+            fflush(stdout);
+            break;
+        }
+        usleep(1000);
+    }
+
     /* Wait for any pending async sends to complete before cleanup */
     pending_send_pool_wait_all(&send_pool);
 
@@ -585,17 +623,20 @@ int main(int argc, char **argv)
         map_name = map_name ? map_name + 1 : map_path ? map_path : "unknown";
         int need_header = access(csv_path, F_OK) != 0;
         FILE *fp = fopen(csv_path, "a");
-        /* For decentralized: avg comm time per process, compute time = runtime - avg_comm */
-        double avg_comm_time = total_comm_time / world_size;
-        double compute_time = runtime - avg_comm_time;
+        /* For decentralized: use totals across all ranks */
+        double compute_time = runtime * world_size - total_comm_time;
+        if (compute_time < 0.0)
+        {
+            compute_time = 0.0;
+        }
+        const char *status = (global_solution < DBL_MAX / 2.0) ? "success" : (any_timeout ? "timeout" : "failure");
+        double cost_out = (global_solution < DBL_MAX / 2.0) ? global_solution : -1.0;
         if (fp)
         {
             if (need_header)
             {
                 fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,comm_time_sec,compute_time_sec,timeout_sec,status\n");
             }
-            const char *status = (global_solution < DBL_MAX / 2.0) ? "success" : (any_timeout ? "timeout" : "failure");
-            double cost_out = (global_solution < DBL_MAX / 2.0) ? global_solution : -1.0;
             fprintf(fp,
                     "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.6f,%.6f,%.2f,%s\n",
                     map_name,
@@ -607,7 +648,7 @@ int main(int argc, char **argv)
                     total_conflicts,
                     cost_out,
                     runtime,
-                    avg_comm_time,
+                    total_comm_time,
                     compute_time,
                     timeout_seconds,
                     status);
@@ -618,17 +659,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "Warning: could not open CSV file %s for writing.\n", csv_path);
         }
 
-        if (global_solution < DBL_MAX / 2.0)
-        {
-            printf("[Decentral] Found solution cost=%.0f (expanded=%lld, comm=%.3fs, compute=%.3fs)\n", 
-                   global_solution, total_expanded, avg_comm_time, compute_time);
-        }
-        else
-        {
-            printf("[Decentral] No solution found (expanded=%lld, status=%s)\n",
-                   total_expanded,
-                   any_timeout ? "timeout" : "failure");
-        }
+        printf("[Decentral] Summary: status=%s cost=%.0f runtime=%.3fs comm=%.3fs compute=%.3fs "
+               "expanded=%lld generated=%lld conflicts=%lld\n",
+               status,
+               cost_out,
+               runtime,
+               total_comm_time,
+               compute_time,
+               total_expanded,
+               total_generated,
+               total_conflicts);
+        fflush(stdout);
     }
 
     problem_instance_free(&instance);

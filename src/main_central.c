@@ -190,6 +190,28 @@ int main(int argc, char **argv)
     MPI_Bcast(&expanders, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&low_level_pool, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
+    int layout_ok = 1;
+    if (world_rank == 0)
+    {
+        int needed = 1 + expanders + low_level_pool;
+        if (needed > world_size)
+        {
+            fprintf(stderr,
+                    "Requested expanders/pool exceed MPI ranks: need %d, have %d (expanders=%d, pool=%d)\n",
+                    needed,
+                    world_size,
+                    expanders,
+                    low_level_pool);
+            layout_ok = 0;
+        }
+    }
+    MPI_Bcast(&layout_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (!layout_ok)
+    {
+        MPI_Finalize();
+        return 1;
+    }
+
     int worker_count = expanders;
     int pool_start = 1 + expanders;
     int pool_end = pool_start + low_level_pool;
@@ -229,14 +251,14 @@ int main(int argc, char **argv)
         map_name = map_name ? map_name + 1 : map_path ? map_path : "unknown";
         int need_header = access(csv_path, F_OK) != 0;
         FILE *fp = fopen(csv_path, "a");
+        const char *status = stats.solution_found ? "success" : (stats.timed_out ? "timeout" : "failure");
+        double cost_out = stats.solution_found ? stats.best_cost : -1.0;
         if (fp)
         {
             if (need_header)
             {
                 fprintf(fp, "map,agents,width,height,nodes_expanded,nodes_generated,conflicts,cost,runtime_sec,comm_time_sec,compute_time_sec,timeout_sec,status\n");
             }
-            const char *status = stats.solution_found ? "success" : (stats.timed_out ? "timeout" : "failure");
-            double cost_out = stats.solution_found ? stats.best_cost : -1.0;
             fprintf(fp,
                     "%s,%d,%d,%d,%lld,%lld,%lld,%.0f,%.6f,%.6f,%.6f,%.2f,%s\n",
                     map_name,
@@ -258,6 +280,18 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "Warning: could not open CSV file %s for writing.\n", csv_path);
         }
+
+        printf("[Central] Summary: status=%s cost=%.0f runtime=%.3fs comm=%.3fs compute=%.3fs "
+               "expanded=%lld generated=%lld conflicts=%lld\n",
+               status,
+               cost_out,
+               stats.runtime_sec,
+               stats.comm_time_sec,
+               stats.compute_time_sec,
+               stats.nodes_expanded,
+               stats.nodes_generated,
+               stats.conflicts_detected);
+        fflush(stdout);
     }
     else if (world_rank >= 1 && world_rank < 1 + worker_count)
     {

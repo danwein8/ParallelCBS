@@ -476,14 +476,16 @@ def plot_comm_percentage(central, decentral):
     if has_central_timing:
         central_success = central[(central['status'] == 'success') & (central['runtime_sec'] > 0.01)].copy()
         if len(central_success) > 0:
-            central_success['comm_pct'] = (central_success['comm_time_sec'] / central_success['runtime_sec']) * 100
+            total_time = central_success['comm_time_sec'] + central_success['compute_time_sec']
+            central_success['comm_pct'] = np.where(total_time > 0, (central_success['comm_time_sec'] / total_time) * 100, 0)
             central_success['version'] = 'centralized'
             all_data.append(central_success[['agents', 'comm_pct', 'version']])
     
     if has_decentral_timing:
         decentral_success = decentral[(decentral['status'] == 'success') & (decentral['runtime_sec'] > 0.01)].copy()
         if len(decentral_success) > 0:
-            decentral_success['comm_pct'] = (decentral_success['comm_time_sec'] / decentral_success['runtime_sec']) * 100
+            total_time = decentral_success['comm_time_sec'] + decentral_success['compute_time_sec']
+            decentral_success['comm_pct'] = np.where(total_time > 0, (decentral_success['comm_time_sec'] / total_time) * 100, 0)
             decentral_success['version'] = 'decentralized'
             all_data.append(decentral_success[['agents', 'comm_pct', 'version']])
     
