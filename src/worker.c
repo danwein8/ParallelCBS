@@ -6,6 +6,7 @@
 #include "serialization.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <unistd.h>
 
 static HighLevelNode *clone_parent_node(const HighLevelNode *parent)
@@ -106,6 +107,13 @@ static bool process_node(const ProblemInstance *instance,
            worker_rank, node->id, node->depth, node->cost);
     fflush(stdout);
     Conflict conflict;
+    if (incumbent_cost > 0 && node->cost >= (double)incumbent_cost)
+    {
+        printf("[Worker %d] Skipping node id=%d cost=%.0f due to incumbent %d\n",
+               worker_rank, node->id, node->cost, incumbent_cost);
+        fflush(stdout);
+        return false;
+    }
     if (!cbs_detect_conflict(node, &conflict))
     {
         SerializedNode payload;
@@ -194,6 +202,8 @@ void run_worker(const ProblemInstance *instance,
     PendingSendPool send_pool;
     pending_send_pool_init(&send_pool);
 
+    int incumbent_bound = INT_MAX;
+
     int active = 1;
     while (active)
     {
@@ -222,11 +232,27 @@ void run_worker(const ProblemInstance *instance,
             active = 0;
             break;
         }
+        else if (status.MPI_TAG == TAG_INCUMBENT)
+        {
+            int new_incumbent = INT_MAX;
+            MPI_Recv(&new_incumbent, 1, MPI_INT, coordinator_rank, TAG_INCUMBENT, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (new_incumbent < incumbent_bound)
+            {
+                incumbent_bound = new_incumbent;
+                printf("[Worker %d] Updated incumbent bound to %d\n", world_rank, incumbent_bound);
+                fflush(stdout);
+            }
+            continue;
+        }
         else if (status.MPI_TAG == TAG_TASK)
         {
             SerializedNode received;
             receive_serialized_node(coordinator_rank, TAG_TASK, &received, NULL);
             int incumbent_cost = received.aux_value;
+            if (incumbent_cost > 0 && incumbent_cost < incumbent_bound)
+            {
+                incumbent_bound = incumbent_cost;
+            }
             HighLevelNode *node = deserialize_high_level_node(&received);
             free_serialized_node(&received);
             if (!node)
@@ -234,7 +260,7 @@ void run_worker(const ProblemInstance *instance,
                 continue;
             }
 
-            process_node(instance, ll_ctx, node, incumbent_cost, coordinator_rank, world_rank, &send_pool);
+            process_node(instance, ll_ctx, node, incumbent_bound, coordinator_rank, world_rank, &send_pool);
             cbs_node_free(node);
         }
     }

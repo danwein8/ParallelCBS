@@ -93,7 +93,7 @@ int main(int argc, char **argv)
     const char *map_path = NULL;
     const char *agents_path = NULL;
     int expanders = -1;
-    int low_level_pool = 0; /* centralized version defaults to no LL pool */
+    int low_level_pool = -1; /* centralized version: choose LL pool based on world size if not specified */
     double timeout_seconds = 0.0;
     const char *csv_path = "results_central.csv";
 
@@ -169,22 +169,23 @@ int main(int argc, char **argv)
     if (world_rank == 0)
     {
         int available = world_size - 1;
+        /* Choose a default low-level pool if user did not specify */
+        if (low_level_pool < 0)
+        {
+            /* Reserve ~25% of available ranks for LL pool when enough ranks exist */
+            low_level_pool = available >= 4 ? available / 4 : (available >= 2 ? 1 : 0);
+        }
         if (expanders < 0)
         {
             expanders = available > 0 ? available : 1;
         }
-        if (low_level_pool < 0)
+        /* Ensure at least one expander remains */
+        if (low_level_pool >= available)
         {
-            low_level_pool = 0;
+            low_level_pool = available > 0 ? available - 1 : 0;
         }
-        if (expanders < 1)
-        {
-            expanders = 1;
-        }
-        if (expanders > available)
-        {
-            expanders = available;
-        }
+        expanders = available - low_level_pool;
+        if (expanders < 1) expanders = 1;
     }
 
     MPI_Bcast(&expanders, 1, MPI_INT, 0, MPI_COMM_WORLD);

@@ -51,6 +51,15 @@ static void dispatch_node(const HighLevelNode *node,
     free_serialized_node(&payload);
 }
 
+static void broadcast_incumbent(double incumbent_cost, const WorkerSet *workers)
+{
+    int cost_int = (int)ceil(incumbent_cost);
+    for (int i = 0; i < workers->count; ++i)
+    {
+        MPI_Send(&cost_int, 1, MPI_INT, workers->ranks[i], TAG_INCUMBENT, MPI_COMM_WORLD);
+    }
+}
+
 void run_coordinator(const ProblemInstance *instance,
                      const LowLevelContext *ll_ctx,
                      const WorkerSet *workers,
@@ -189,8 +198,19 @@ void run_coordinator(const ProblemInstance *instance,
                incumbent_str);
         fflush(stdout);
 
-        outstanding = plateau_size;  /* Assign (not declare) to use function-scope variable */
-        for (int i = 0; i < plateau_size; ++i)
+        /* Limit dispatch to available workers; requeue overflow to open list */
+        int dispatch_count = plateau_size;
+        if (dispatch_count > workers->count)
+        {
+            for (int i = workers->count; i < plateau_size; ++i)
+            {
+                pq_push(&open, plateau[i]->cost, plateau[i]);
+            }
+            dispatch_count = workers->count;
+        }
+
+        outstanding = dispatch_count;  /* Assign (not declare) to use function-scope variable */
+        for (int i = 0; i < dispatch_count; ++i)
         {
             int worker_rank = select_worker(workers, &rr_index);
             printf("[Coordinator %d] -> Worker %d: node id=%d depth=%d cost=%.0f\n",
@@ -257,6 +277,7 @@ void run_coordinator(const ProblemInstance *instance,
                     }
                     incumbent_solution = solution_node;
                     incumbent_cost = solution_node->cost;
+                    broadcast_incumbent(incumbent_cost, workers);
                     printf("[Coordinator %d] New incumbent: node id=%d cost=%.0f depth=%d\n",
                            coord_rank,
                            solution_node->id,
