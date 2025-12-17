@@ -169,11 +169,11 @@ int main(int argc, char **argv)
     if (world_rank == 0)
     {
         int available = world_size - 1;
-        /* Choose a default low-level pool if user did not specify */
+        /* By default, don't use ll-pool unless explicitly requested.
+         * The LL pool adds communication overhead that may not help on smaller instances. */
         if (low_level_pool < 0)
         {
-            /* Reserve ~25% of available ranks for LL pool when enough ranks exist */
-            low_level_pool = available >= 4 ? available / 4 : (available >= 2 ? 1 : 0);
+            low_level_pool = 0;
         }
         if (expanders < 0)
         {

@@ -153,12 +153,15 @@ void run_coordinator(const ProblemInstance *instance,
         double plateau_cost = 0.0;
         double key = 0.0;
         HighLevelNode *front = (HighLevelNode *)pq_pop(&open, &plateau_cost);
-        int plateau_capacity = workers->count > 0 ? workers->count : 1;
-        HighLevelNode **plateau = (HighLevelNode **)malloc(sizeof(HighLevelNode *) * (size_t)plateau_capacity);
+        
+        /* Only collect up to workers->count nodes at the same cost level.
+         * This avoids the overhead of popping the entire plateau then re-pushing overflow. */
+        int max_dispatch = workers->count > 0 ? workers->count : 1;
+        HighLevelNode **plateau = (HighLevelNode **)malloc(sizeof(HighLevelNode *) * (size_t)max_dispatch);
         int plateau_size = 0;
         plateau[plateau_size++] = front;
 
-        while (open.count > 0)
+        while (open.count > 0 && plateau_size < max_dispatch)
         {
             HighLevelNode *peek = (HighLevelNode *)pq_peek(&open, &key);
             if (fabs(peek->cost - plateau_cost) > 1e-6)
@@ -166,18 +169,6 @@ void run_coordinator(const ProblemInstance *instance,
                 break;
             }
             HighLevelNode *equal_node = (HighLevelNode *)pq_pop(&open, &key);
-            if (plateau_size >= plateau_capacity)
-            {
-                plateau_capacity *= 2;
-                HighLevelNode **new_plateau = (HighLevelNode **)realloc(plateau, sizeof(HighLevelNode *) * (size_t)plateau_capacity);
-                if (!new_plateau)
-                {
-                    fprintf(stderr, "coordinator: failed to allocate plateau memory (size=%d)\n", plateau_capacity);
-                    free(plateau);
-                    exit(EXIT_FAILURE);
-                }
-                plateau = new_plateau;
-            }
             plateau[plateau_size++] = equal_node;
         }
 
@@ -198,16 +189,7 @@ void run_coordinator(const ProblemInstance *instance,
                incumbent_str);
         fflush(stdout);
 
-        /* Limit dispatch to available workers; requeue overflow to open list */
         int dispatch_count = plateau_size;
-        if (dispatch_count > workers->count)
-        {
-            for (int i = workers->count; i < plateau_size; ++i)
-            {
-                pq_push(&open, plateau[i]->cost, plateau[i]);
-            }
-            dispatch_count = workers->count;
-        }
 
         outstanding = dispatch_count;  /* Assign (not declare) to use function-scope variable */
         for (int i = 0; i < dispatch_count; ++i)
